@@ -1,4 +1,4 @@
-# Channel-specific Prototype Network
+# Channel-Specific Prototype Network
 
 Intrinsically explainable neural networks using channel specific prototypes. Code accompanient for Narayanan A and Bergen KJ, Prototype-based Explainable Neural Networks with Channel-specific Reasoning for Geospatial Learning Tasks. (submitted, 2026)
 
