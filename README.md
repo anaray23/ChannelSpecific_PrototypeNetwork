@@ -2,10 +2,6 @@
 
 Intrinsically explainable neural network method using channel specific prototypes. Code accompanient for Narayanan A and Bergen KJ, Prototype-based Explainable Neural Networks with Channel-specific Reasoning for Geospatial Learning Tasks. (submitted, 2026)
 
-## Description
-
-An in-depth paragraph about your project and overview of use.
-
 ## Getting Started
 
 ### Create a Python environment 
