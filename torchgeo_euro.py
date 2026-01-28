@@ -1,0 +1,548 @@
+#script modified from TorchGeo package https://torchgeo.readthedocs.io/en/latest/api/datasets.html#torchgeo.datasets.EuroSAT. to accommodate data transform class ScaleandNormalize and GPU device
+
+import os
+import re
+import sys
+import warnings
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any, ClassVar, cast
+from torchvision.transforms import v2 as transforms
+import fiona
+import fiona.transform
+import numpy as np
+import pyproj
+import rasterio
+import rasterio.merge
+import shapely
+import torch
+from rasterio.crs import CRS
+from rasterio.enums import Resampling
+from rasterio.io import DatasetReader
+from rasterio.vrt import WarpedVRT
+from rtree.index import Index, Property
+from torch import Tensor
+from torch.utils.data import Dataset
+from torchvision.datasets import ImageFolder
+from torchvision.datasets.folder import default_loader as pil_loader
+
+from torchgeo.datasets.errors import DatasetNotFoundError
+from torchgeo.datasets.utils import (
+    BoundingBox,
+    Path,
+    array_to_tensor,
+    concat_samples,
+    disambiguate_timestamp,
+    merge_samples,
+    path_is_vsi,
+)
+
+import os
+from collections.abc import Callable, Sequence
+from typing import ClassVar, cast
+
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from matplotlib.figure import Figure
+from torch import Tensor
+
+import abc
+import fnmatch
+import functools
+import glob
+import os
+import re
+import sys
+import warnings
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any, ClassVar, cast
+
+from torchgeo.datasets.errors import DatasetNotFoundError, RGBBandsMissingError
+from torchgeo.datasets.utils import Path, check_integrity, download_url, extract_archive, rasterio_loader
+
+class ScaleAndNormalize(torch.nn.Module):
+
+
+    def __init__(self, min, max):
+        super().__init__()
+        
+        if torch.cuda.is_available(): 
+            torch.set_default_device('cuda')
+            torch.set_default_tensor_type(torch.cuda.FloatTensor)
+            device = torch.device('cuda')
+            print("GPU is set as the default device.")
+
+        else:
+            print("CUDA is not available. CPU will be used as the default device.")
+            device = 'cpu'
+        
+        self.min = torch.tensor(min).view(-1, 1, 1)  
+        self.max = torch.tensor(max).view(-1, 1, 1)
+
+    def forward(self, sample):
+        image = sample['image']
+        image = (image-self.min)/self.max
+        sample['image'] = image
+        return sample
+
+class NonGeoDataset(Dataset[dict[str, Any]], abc.ABC):
+    """Abstract base class for datasets lacking geospatial information.
+
+    This base class is designed for datasets with pre-defined image chips.
+    """
+
+    @abc.abstractmethod
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        """Return an index within the dataset.
+
+        Args:
+            index: index to return
+
+        Returns:
+            data and labels at that index
+
+        Raises:
+            IndexError: if index is out of range of the dataset
+        """
+
+    @abc.abstractmethod
+    def __len__(self) -> int:
+        """Return the length of the dataset.
+
+        Returns:
+            length of the dataset
+        """
+
+    def __str__(self) -> str:
+        """Return the informal string representation of the object.
+
+        Returns:
+            informal string representation
+        """
+        return f"""\
+{self.__class__.__name__} Dataset
+    type: NonGeoDataset
+    size: {len(self)}"""
+
+
+class NonGeoClassificationDataset(NonGeoDataset, ImageFolder):  # type: ignore[misc]
+    """Abstract base class for classification datasets lacking geospatial information.
+
+    This base class is designed for datasets with pre-defined image chips which
+    are separated into separate folders per class.
+    
+    """
+
+    def __init__(
+        self,
+        root: Path = 'data',
+        transforms: Callable[[dict[str, Tensor]], dict[str, Tensor]] | None = None,
+        loader: Callable[[Path], Any] | None = pil_loader,
+        is_valid_file: Callable[[Path], bool] | None = None,
+    ) -> None:
+        """Initialize a new NonGeoClassificationDataset instance.
+
+        Args:
+            root: root directory where dataset can be found
+            transforms: a function/transform that takes input sample and its target as
+                entry and returns a transformed version
+            loader: a callable function which takes as input a path to an image and
+                returns a PIL Image or numpy array
+            is_valid_file: A function that takes the path of an Image file and checks if
+                the file is a valid file
+        """
+        # When transform & target_transform are None, ImageFolder.__getitem__(index)
+        # returns a PIL.Image and int for image and label, respectively
+        super().__init__(
+            root=root,
+            transform=None,
+            target_transform=None,
+            loader=loader,
+            is_valid_file=is_valid_file,
+        )
+
+        # Must be set after calling super().__init__()
+        self.transforms = transforms
+
+    def __getitem__(self, index: int) -> dict[str, Tensor]:
+        """Return an index within the dataset.
+
+        Args:
+            index: index to return
+
+        Returns:
+            data and label at that index
+        """
+        image, label = self._load_image(index)
+        sample = {'image': image, 'label': label}
+
+        if self.transforms is not None:
+            sample = self.transforms(sample)
+
+        return sample
+
+    def __len__(self) -> int:
+        """Return the number of data points in the dataset.
+
+        Returns:
+            length of the dataset
+        """
+        return len(self.imgs)
+
+    def _load_image(self, index: int) -> tuple[Tensor, Tensor]:
+        """Load a single image and its class label.
+
+        Args:
+            index: index to return
+
+        Returns:
+            the image and class label
+        """
+        if torch.cuda.is_available(): ########changed
+            torch.set_default_device('cuda')
+            torch.set_default_tensor_type(torch.cuda.FloatTensor)
+            device = torch.device('cuda')
+            #print("GPU is set as the default device.")
+
+        else:
+            #print("CUDA is not available. CPU will be used as the default device.")
+            device = 'cpu'
+        img, label = ImageFolder.__getitem__(self, index)
+        array: np.typing.NDArray[np.int_] = np.array(img)
+        tensor = torch.from_numpy(array).float().to(device)
+        #print(tensor.get_device())
+        # Convert from HxWxC to CxHxW
+        tensor = tensor.permute((2, 0, 1))
+        label = torch.tensor(label)
+        #print(label.get_device())
+        return tensor, label
+
+
+
+
+class EuroSAT(NonGeoClassificationDataset):
+    """EuroSAT dataset.
+
+    The `EuroSAT <https://github.com/phelber/EuroSAT>`__ dataset is based on Sentinel-2
+    satellite images covering 13 spectral bands and consists of 10 target classes with
+    a total of 27,000 labeled and geo-referenced images.
+
+    Dataset format:
+
+    * rasters are 13-channel GeoTiffs
+    * labels are values in the range [0,9]
+
+    Dataset classes:
+
+    * Annual Crop
+    * Forest
+    * Herbaceous Vegetation
+    * Highway
+    * Industrial Buildings
+    * Pasture
+    * Permanent Crop
+    * Residential Buildings
+    * River
+    * Sea & Lake
+
+    This dataset uses the train/val/test splits defined in the "In-domain representation
+    learning for remote sensing" paper:
+
+    * https://arxiv.org/abs/1911.06721
+
+    If you use this dataset in your research, please cite the following papers:
+
+    * https://ieeexplore.ieee.org/document/8736785
+    * https://ieeexplore.ieee.org/document/8519248
+    """
+
+    url = 'https://hf.co/datasets/torchgeo/eurosat/resolve/1ce6f1bfb56db63fd91b6ecc466ea67f2509774c/'
+    filename = 'EuroSATallBands.zip'
+    md5 = '5ac12b3b2557aa56e1826e981e8e200e'
+
+    # For some reason the class directories are actually nested in this directory
+    base_dir = os.path.join(
+        'ds', 'images', 'remote_sensing', 'otherDatasets', 'sentinel_2', 'tif'
+    )
+
+    splits = ('train', 'val', 'test')
+    split_filenames: ClassVar[dict[str, str]] = {
+        'train': 'eurosat-train.txt',
+        'val': 'eurosat-val.txt',
+        'test': 'eurosat-test.txt',
+    }
+    split_md5s: ClassVar[dict[str, str]] = {
+        'train': '908f142e73d6acdf3f482c5e80d851b1',
+        'val': '95de90f2aa998f70a3b2416bfe0687b4',
+        'test': '7ae5ab94471417b6e315763121e67c5f',
+    }
+
+    all_band_names = (
+        'B01',
+        'B02',
+        'B03',
+        'B04',
+        'B05',
+        'B06',
+        'B07',
+        'B08',
+        'B09',
+        'B10',
+        'B11',
+        'B12',
+        'B8A',
+    )
+
+    rgb_bands = ('B04', 'B03', 'B02')
+
+    BAND_SETS: ClassVar[dict[str, tuple[str, ...]]] = {
+        'all': all_band_names,
+        'rgb': rgb_bands,
+    }
+
+    def __init__(
+        self,
+        root: Path = 'data',
+        split: str = 'train',
+        bands: Sequence[str] = BAND_SETS['all'],
+        transforms: Callable[[dict[str, Tensor]], dict[str, Tensor]] | None = None,
+        download: bool = False,
+        checksum: bool = False,
+    ) -> None:
+        """Initialize a new EuroSAT dataset instance.
+
+        Args:
+            root: root directory where dataset can be found
+            split: one of "train", "val", or "test"
+            bands: a sequence of band names to load
+            transforms: a function/transform that takes input sample and its target as
+                entry and returns a transformed version
+            download: if True, download dataset and store it in the root directory
+            checksum: if True, check the MD5 of the downloaded files (may be slow)
+
+        Raises:
+            AssertionError: if ``split`` argument is invalid
+            DatasetNotFoundError: If dataset is not found and *download* is False.
+
+        .. versionadded:: 0.3
+           The *bands* parameter.
+        """
+        self.root = root
+        self.transforms = transforms
+        self.download = download
+        self.checksum = checksum
+
+        assert split in ['train', 'val', 'test']
+
+        if torch.cuda.is_available(): ########changed
+            torch.set_default_device('cuda')
+            torch.set_default_tensor_type(torch.cuda.FloatTensor)
+            print("GPU is set as the default device.")
+        else:
+            print("CUDA is not available. CPU will be used as the default device.")
+
+        self._validate_bands(bands)
+        self.bands = bands
+        self.band_indices = Tensor(
+            [self.all_band_names.index(b) for b in bands if b in self.all_band_names]
+        ).long() 
+
+        self._verify()
+
+        valid_fns = set()
+        with open(os.path.join(self.root, self.split_filenames[split])) as f:
+            for fn in f:
+                valid_fns.add(fn.strip().replace('.jpg', '.tif'))
+
+        def is_in_split(x: Path) -> bool:
+            return os.path.basename(x) in valid_fns
+
+        super().__init__(
+            root=os.path.join(root, self.base_dir),
+            transforms=transforms,
+            loader=rasterio_loader,
+            is_valid_file=is_in_split,
+        )
+
+    def __getitem__(self, index: int) -> dict[str, Tensor]:
+        """Return an index within the dataset.
+
+        Args:
+            index: index to return
+        Returns:
+            data and label at that index
+        """
+        image, label = self._load_image(index)
+
+        image = torch.index_select(image, dim=0, index=self.band_indices).float() 
+        sample = {'image': image, 'label': label}
+
+        if self.transforms is not None:
+            sample = self.transforms(sample)
+
+        return sample['image'], sample['label']  ####changed - need to change plot
+
+    def _check_integrity(self) -> bool:
+        """Check integrity of dataset.
+
+        Returns:
+            True if dataset files are found and/or MD5s match, else False
+        """
+        integrity: bool = check_integrity(
+            os.path.join(self.root, self.filename), self.md5 if self.checksum else None
+        )
+        return integrity
+
+    def _verify(self) -> None:
+        """Verify the integrity of the dataset."""
+        # Check if the files already exist
+        filepath = os.path.join(self.root, self.base_dir)
+        if os.path.exists(filepath):
+            return
+
+        # Check if zip file already exists (if so then extract)
+        if self._check_integrity():
+            self._extract()
+            return
+
+        # Check if the user requested to download the dataset
+        if not self.download:
+            raise DatasetNotFoundError(self)
+
+        # Download and extract the dataset
+        self._download()
+        self._extract()
+
+    def _download(self) -> None:
+        """Download the dataset."""
+        download_url(
+            self.url + self.filename, self.root, md5=self.md5 if self.checksum else None
+        )
+        for split in self.splits:
+            download_url(
+                self.url + self.split_filenames[split],
+                self.root,
+                md5=self.split_md5s[split] if self.checksum else None,
+            )
+
+    def _extract(self) -> None:
+        """Extract the dataset."""
+        filepath = os.path.join(self.root, self.filename)
+        extract_archive(filepath)
+
+    def _validate_bands(self, bands: Sequence[str]) -> None:
+        """Validate list of bands.
+
+        Args:
+            bands: user-provided sequence of bands to load
+
+        Raises:
+            AssertionError: if ``bands`` is not a sequence
+            ValueError: if an invalid band name is provided
+
+        .. versionadded:: 0.3
+        """
+        assert isinstance(bands, Sequence), "'bands' must be a sequence"
+        for band in bands:
+            if band not in self.all_band_names:
+                raise ValueError(f"'{band}' is an invalid band name.")
+
+    def plot(
+        self,
+        sample: dict[str, Tensor],
+        show_titles: bool = True,
+        suptitle: str | None = None,
+    ) -> Figure:
+        """Plot a sample from the dataset.
+
+        Args:
+            sample: a sample returned by :meth:`NonGeoClassificationDataset.__getitem__`
+            show_titles: flag indicating whether to show titles above each panel
+            suptitle: optional string to use as a suptitle
+
+        Returns:
+            a matplotlib Figure with the rendered sample
+
+        Raises:
+            RGBBandsMissingError: If *bands* does not include all RGB bands.
+
+        .. versionadded:: 0.2
+        """
+        rgb_indices = []
+        for band in self.rgb_bands:
+            if band in self.bands:
+                rgb_indices.append(self.bands.index(band))
+            else:
+                raise RGBBandsMissingError()
+
+        image = np.take(sample['image'].numpy(), indices=rgb_indices, axis=0)
+        image = np.rollaxis(image, 0, 3)
+        image = np.clip(image / 3000, 0, 1)
+
+        label = cast(int, sample['label'].item())
+        label_class = self.classes[label]
+
+        showing_predictions = 'prediction' in sample
+        if showing_predictions:
+            prediction = cast(int, sample['prediction'].item())
+            prediction_class = self.classes[prediction]
+
+        fig, ax = plt.subplots(figsize=(4, 4))
+        ax.imshow(image)
+        ax.axis('off')
+        if show_titles:
+            title = f'Label: {label_class}'
+            if showing_predictions:
+                title += f'\nPrediction: {prediction_class}'
+            ax.set_title(title)
+
+        if suptitle is not None:
+            plt.suptitle(suptitle)
+        return fig
+
+
+class EuroSATSpatial(EuroSAT):
+    """Overrides the default EuroSAT dataset splits.
+
+    Splits the data into training, validation, and test sets based on longitude.
+    The splits are distributed as 60%, 20%, and 20% respectively.
+
+    .. versionadded:: 0.6
+    """
+
+    split_filenames: ClassVar[dict[str, str]] = {
+        'train': 'eurosat-spatial-train.txt',
+        'val': 'eurosat-spatial-val.txt',
+        'test': 'eurosat-spatial-test.txt',
+    }
+    split_md5s: ClassVar[dict[str, str]] = {
+        'train': '7be3254be39f23ce4d4d144290c93292',
+        'val': 'acf392290050bb3df790dc8fc0ebf193',
+        'test': '5ec1733f9c16116bf0aa2d921fc613ef',
+    }
+
+
+class EuroSAT100(EuroSAT):
+    """Subset of EuroSAT containing only 100 images.
+
+    Intended for tutorials and demonstrations, not for benchmarking.
+
+    Maintains the same file structure, classes, and train-val-test split. Each class has
+    10 images (6 train, 2 val, 2 test), for a total of 100 images.
+
+    .. versionadded:: 0.5
+    """
+
+    filename = 'EuroSAT100.zip'
+    md5 = 'c21c649ba747e86eda813407ef17d596'
+
+    split_filenames: ClassVar[dict[str, str]] = {
+        'train': 'eurosat-100-train.txt',
+        'val': 'eurosat-100-val.txt',
+        'test': 'eurosat-100-test.txt',
+    }
+    split_md5s: ClassVar[dict[str, str]] = {
+        'train': '033d0c23e3a75e3fa79618b0e35fe1c7',
+        'val': '3e3f8b3c344182b8d126c4cc88f3f215',
+        'test': 'f908f151b950f270ad18e61153579794',
+    }
