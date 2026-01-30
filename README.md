@@ -12,7 +12,7 @@ conda env create -f environment.yml
 ### Creating the `data/` Folder
 
 1. **Download preprocessed datasets and saved models**  
-   Download the `data/` folder from the associated Zenodo repository. This folder contains:
+   Download the `data/` folder from the associated Zenodo repository (https://doi.org/10.5281/zenodo.18425035). This folder contains:
    - The Synthetic MNIST dataset  
    - The processed MJO dataset used in the study
    - `models/` folder with saved models and prototype information for each case study located in their respective subdirectories
