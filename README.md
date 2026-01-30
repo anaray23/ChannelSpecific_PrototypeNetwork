@@ -26,6 +26,11 @@ conda env create -f environment.yml
    ```bash
    python generate_syntheticMNIST.py
 
+4. **(Optional) Process MJO data from raw .nc files **  
+   To process the MJO data, download raw OLR, U200 and U850 .nc files from https://zenodo.org/records/3968896 (B Toms 2020) into the data/ folder and run:
+   ```bash
+   python preprocess_data.py
+
 ## Loading and Running the Notebooks
 
 Each case study includes a Python notebook that loads a trained ML model and reproduces the figures presented in the paper.
