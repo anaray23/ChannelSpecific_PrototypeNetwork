@@ -55,7 +55,7 @@ To reproduce the paper figures:
 
 2. Launch and run the corresponding notebook to generate the figures
 
-## Zenodo DOI: [![DOI](https://zenodo.org/badge/1144590605.svg)](https://doi.org/10.5281/zenodo.18434306)
+## Zenodo Code Repository DOI: [![DOI](https://zenodo.org/badge/1144590605.svg)](https://doi.org/10.5281/zenodo.18434306)
 
 ## Authors
 
